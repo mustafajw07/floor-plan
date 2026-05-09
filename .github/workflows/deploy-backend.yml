@@ -1,0 +1,24 @@
+name: Deploy Backend (FastAPI) to Render
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**' # Only triggers if files in the backend folder change
+  workflow_dispatch: # Allows you to manually trigger the workflow from GitHub
+
+jobs:
+  deploy:
+    name: Trigger Render Deployment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render Deploy Hook
+        # This makes a POST request to your secure Render URL
+        run: |
+          if [ -z "${{ secrets.RENDER_DEPLOY_HOOK }}" ]; then
+            echo "Error: RENDER_DEPLOY_HOOK secret is not set."
+            exit 1
+          fi
+          curl -X POST -d {} ${{ secrets.RENDER_DEPLOY_HOOK }}
+          echo "Deployment triggered successfully on Render!"

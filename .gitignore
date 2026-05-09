@@ -1,0 +1,11 @@
+# dont push any md files to github, they are only for local use and contain sensitive info but push REAMDE.md to github
+*.md
+!README.md
+*.jpeg
+*.jpg
+*.png
+*.pdf
+*.log
+*.env
+*.db
+*.sqlite

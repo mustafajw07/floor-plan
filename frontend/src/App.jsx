@@ -4,7 +4,7 @@ import './index.css';
 import SmartWorkspace from './components/SmartWorkspace';
 import Departments from './components/Departments';
 
-const API = 'http://localhost:8000';  // TODO: move to .env
+const API = 'https://floor-plan-1fq2.onrender.com';  // TODO: move to .env
 
 const STEPS = [
   { label: 'Upload Plan' },

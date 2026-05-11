@@ -33,14 +33,16 @@ export default function SmartWorkspace({
   departments,
   mode,
   processResult,
+  pageLabel,
 }) {
   const [imgEl, imgStatus] = useImage(imageSrc || '');
   const containerRef = useRef(null);
   const stageRef     = useRef(null);
 
-  // Canvas sizing
-  const [stageSize, setStageSize] = useState({ width: 800, height: 500 });
-  const [scale,     setScale]     = useState(1);
+  // Canvas sizing — stageSize is derived from scale, not stored in state
+  const [scale,    setScale]    = useState(1);
+  const [fitScale, setFitScale] = useState(1); // auto-fit scale (without user zoom)
+  const stageSize = { width: Math.round(imageWidth * scale), height: Math.round(imageHeight * scale) };
 
   // Drawing
   const [tool,    setTool]    = useState('pointer'); // 'pointer' | 'draw'
@@ -66,6 +68,18 @@ export default function SmartWorkspace({
 
   // Clipboard for copy/paste
   const clipboardRef = useRef([]);
+
+  // Export preview
+  const [showPreview, setShowPreview]       = useState(false);
+  const [previewDataUrl, setPreviewDataUrl] = useState(null);
+
+  // Accordion / panel visibility
+  const [sidebarOpen,  setSidebarOpen]  = useState(true);
+  const [paintOpen,    setPaintOpen]    = useState(true);
+  const [roomsOpen,    setRoomsOpen]    = useState(true);
+  const [coverageOpen, setCoverageOpen] = useState(true);
+  const [bannerOpen,   setBannerOpen]   = useState(true);
+  const [progressOpen, setProgressOpen] = useState(true);
 
   // Always-fresh ref to spaces — avoids stale closures in event handlers
   const spacesRef = useRef(spaces);
@@ -131,22 +145,52 @@ export default function SmartWorkspace({
   }, [setSpaces, fireToast, syncHistoryState]);
 
   // ── Canvas sizing ──────────────────────────────────────────────────────────
+  // Tracks whether we have already set the initial fit-scale for the current
+  // image.  recalc resets scale only on first call (image load); subsequent
+  // calls from ResizeObserver only update fitScale so user zoom is preserved.
+  const initializedRef = useRef(false);
+
   const recalc = useCallback(() => {
     if (!containerRef.current || !imgEl) return;
-    const cw   = containerRef.current.offsetWidth || 800;
-    const maxH = Math.min(window.innerHeight * 0.66, 660);
-    const s    = Math.min(cw / imageWidth, maxH / imageHeight, 2);
-    setScale(s);
-    setStageSize({ width: Math.round(imageWidth * s), height: Math.round(imageHeight * s) });
-  }, [imgEl, imageWidth, imageHeight]);
+    // clientWidth excludes scrollbar — avoids feedback loop when stage grows
+    const cw = containerRef.current.clientWidth || 800;
+    const s  = Math.min(cw / imageWidth, 2);
+    setFitScale(s);
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      setScale(s);
+    }
+  }, [imgEl, imageWidth]);
 
   useEffect(() => {
+    // New image → reset so the next recalc call snaps scale back to fit
+    initializedRef.current = false;
     recalc();
     if (!containerRef.current) return;
     const ro = new ResizeObserver(recalc);
     ro.observe(containerRef.current);
     return () => ro.disconnect();
   }, [recalc]);
+
+  // ── Zoom controls ──────────────────────────────────────────────────────────
+  const zoomIn    = useCallback(() => setScale(s => Math.min(4.0, +(s * 1.25).toFixed(6))), []);
+  const zoomOut   = useCallback(() => setScale(s => Math.max(0.05, +(s / 1.25).toFixed(6))), []);
+  const zoomReset = useCallback(() => setScale(fitScale), [fitScale]);
+  const zoomPct   = Math.round(scale / (fitScale || 1) * 100);
+
+  // Ctrl/Cmd + Scroll to zoom on the canvas container
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
+      setScale(prev => Math.min(4.0, Math.max(0.05, +(prev * factor).toFixed(6))));
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
 
   // Reset tool/selection on mode change
   useEffect(() => {
@@ -377,13 +421,25 @@ export default function SmartWorkspace({
 
   const closeModal = () => { setShowModal(false); setEditingSpace(null); };
 
-  // ── Export ─────────────────────────────────────────────────────────────────
-  const exportImage = () => {
+  // ── Export / Preview ────────────────────────────────────────────────────────
+  const openPreview = () => {
     if (!stageRef.current) return;
     const uri = stageRef.current.toDataURL({ pixelRatio: 2 });
+    setPreviewDataUrl(uri);
+    setShowPreview(true);
+  };
+
+  const downloadPreview = () => {
+    if (!previewDataUrl) return;
     const a = document.createElement('a');
-    a.href = uri; a.download = 'floorplan-allocation.png'; a.click();
+    const name = pageLabel
+      ? `floorplan-${pageLabel.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.png`
+      : 'floorplan-allocation.png';
+    a.href = previewDataUrl;
+    a.download = name;
+    a.click();
     fireToast('PNG exported!');
+    setShowPreview(false);
   };
 
   // ── Derived values ─────────────────────────────────────────────────────────
@@ -396,26 +452,24 @@ export default function SmartWorkspace({
   return (
     <div>
 
-      {/* ── AI result banner ── */}
-      {processResult && mode === 'edit' && (
-        <div className="alert alert-info d-flex align-items-center gap-2 mb-3 py-2" style={{ fontSize: '0.85rem' }}>
-          🤖 <span>
-            <strong>AI Draft Ready —</strong> {processResult.rooms} room{processResult.rooms !== 1 ? 's' : ''} detected.
-            Review below, draw missing rooms, or click any shape to rename it.
-          </span>
-        </div>
-      )}
-
       {/* ── Assignment progress bar ── */}
       {mode === 'assign' && spaces.length > 0 && (
-        <div className="assign-progress mb-3">
-          <span style={{ fontSize: '0.82rem', fontWeight: 600, whiteSpace: 'nowrap' }}>
-            {assigned} / {spaces.length} assigned
-          </span>
-          <div className="assign-progress-bar-bg">
-            <div className="assign-progress-bar" style={{ width: `${pctDone}%` }} />
+        <div className="top-accordion mb-3">
+          <div className="top-accordion-header" onClick={() => setProgressOpen(v => !v)}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 600, whiteSpace: 'nowrap' }}>{assigned} / {spaces.length} assigned</span>
+              <div className="assign-progress-bar-bg" style={{ flex: 1 }}>
+                <div className="assign-progress-bar" style={{ width: `${pctDone}%` }} />
+              </div>
+              <span style={{ fontSize: '0.82rem', color: 'var(--muted)', minWidth: 32 }}>{pctDone}%</span>
+            </span>
+            <span className={`accordion-chevron ${progressOpen ? 'open' : ''}`}>&#8250;</span>
           </div>
-          <span style={{ fontSize: '0.82rem', color: 'var(--muted)', minWidth: 36 }}>{pctDone}%</span>
+          <div className={`accordion-wrap ${progressOpen ? 'open' : ''}`}>
+            <div className="accordion-inner" style={{ padding: '0.4rem 0.875rem', fontSize: '0.78rem', color: 'var(--muted)' }}>
+              Click a department on the right then click rooms to assign, or click a room directly.
+            </div>
+          </div>
         </div>
       )}
 
@@ -488,8 +542,22 @@ export default function SmartWorkspace({
               </span>
             )}
 
+            {/* ── Zoom controls ── */}
+            <span style={{ borderLeft: '1px solid var(--border)', height: 20, margin: '0 4px' }} />
+            <button className="tool-btn" onClick={zoomOut} title="Zoom out (Ctrl+Scroll)">−</button>
+            <span style={{ fontSize: '0.75rem', color: 'var(--muted)', minWidth: 38, textAlign: 'center', userSelect: 'none', fontVariantNumeric: 'tabular-nums' }}>{zoomPct}%</span>
+            <button className="tool-btn" onClick={zoomIn}  title="Zoom in (Ctrl+Scroll)">+</button>
+            <button className="tool-btn" onClick={zoomReset} title="Reset zoom to fit">⊡ Fit</button>
+            <input
+              type="range"
+              min="25" max="400" step="5"
+              value={Math.min(400, Math.max(25, zoomPct))}
+              onChange={e => setScale(Math.max(0.1, fitScale * Number(e.target.value) / 100))}
+              className="zoom-slider"
+              title={`Scale: ${zoomPct}%`}
+            />
             <div style={{ flex: 1 }} />
-            <button className="tool-btn" onClick={exportImage} title="Export as PNG">⬇ Export PNG</button>
+            <button className="tool-btn" onClick={openPreview} title="Preview & Export as PNG">⬇ Export PNG</button>
           </div>
 
           {/* ── Konva Stage ── */}
@@ -633,39 +701,61 @@ export default function SmartWorkspace({
         </div>
 
         {/* ══ Sidebar ═══════════════════════════════════════════════════════ */}
+        <div className={`sidebar-zone ${sidebarOpen ? 'open' : 'closed'}`}>
+          {/* Pull-tab toggle */}
+          <button
+            className="sidebar-tab"
+            onClick={() => {
+              setSidebarOpen(v => !v);
+              setTimeout(() => { initializedRef.current = false; recalc(); }, 290);
+            }}
+            title={sidebarOpen ? 'Hide panel' : 'Show panel'}
+          >{sidebarOpen ? '›' : '‹'}</button>
         <div className="sidebar">
 
           {/* Quick-assign palette */}
           {mode === 'assign' && (
             <div className="sidebar-card">
-              <div className="sidebar-header">🎨 Quick Paint</div>
-              {departments.length === 0 ? (
-                <div className="empty-state">No departments yet.<br />Add some via ⚙ Departments.</div>
-              ) : departments.map(d => (
-                <div
-                  key={d.id}
-                  className={`dept-assign-btn ${activeDept?.id === d.id ? 'active' : ''}`}
-                  onClick={() => setActiveDept(prev => prev?.id === d.id ? null : d)}
-                >
-                  <div className="dept-dot" style={{ background: d.color }} />
-                  <span>{d.name}</span>
-                  {activeDept?.id === d.id && <span className="dept-checkmark">✓</span>}
+              <div className="sidebar-header accordion-header" onClick={() => setPaintOpen(v => !v)}>
+                <span>🎨 Quick Paint</span>
+                <span className={`accordion-chevron ${paintOpen ? 'open' : ''}`}>›</span>
+              </div>
+              <div className={`accordion-wrap ${paintOpen ? 'open' : ''}`}>
+                <div className="accordion-inner">
+                  {departments.length === 0 ? (
+                    <div className="empty-state">No departments yet.<br />Add some via ⚙ Departments.</div>
+                  ) : departments.map(d => (
+                    <div
+                      key={d.id}
+                      className={`dept-assign-btn ${activeDept?.id === d.id ? 'active' : ''}`}
+                      onClick={() => setActiveDept(prev => prev?.id === d.id ? null : d)}
+                    >
+                      <div className="dept-dot" style={{ background: d.color }} />
+                      <span>{d.name}</span>
+                      {activeDept?.id === d.id && <span className="dept-checkmark">✓</span>}
+                    </div>
+                  ))}
+                  {activeDept && (
+                    <div style={{ padding: '0.4rem 0.875rem', fontSize: '0.72rem', color: 'var(--muted)', borderTop: '1px solid var(--border)' }}>
+                      Click rooms to apply · click again to deselect
+                    </div>
+                  )}
                 </div>
-              ))}
-              {activeDept && (
-                <div style={{ padding: '0.4rem 0.875rem', fontSize: '0.72rem', color: 'var(--muted)', borderTop: '1px solid var(--border)' }}>
-                  Click rooms to apply · click again to deselect
-                </div>
-              )}
+              </div>
             </div>
           )}
 
           {/* Rooms list */}
           <div className="sidebar-card">
-            <div className="sidebar-header">
+            <div className="sidebar-header accordion-header" onClick={() => setRoomsOpen(v => !v)}>
               <span>Rooms</span>
-              <span className="badge-count">{spaces.length}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <span className="badge-count">{spaces.length}</span>
+                <span className={`accordion-chevron ${roomsOpen ? 'open' : ''}`}>›</span>
+              </span>
             </div>
+            <div className={`accordion-wrap ${roomsOpen ? 'open' : ''}`}>
+            <div className="accordion-inner">
             <div className="space-list">
               {spaces.length === 0 ? (
                 <div className="empty-state">
@@ -688,12 +778,19 @@ export default function SmartWorkspace({
                 </div>
               ))}
             </div>
+            </div>
+            </div>
           </div>
 
           {/* Department coverage (assign mode) */}
           {mode === 'assign' && spaces.length > 0 && (
             <div className="sidebar-card">
-              <div className="sidebar-header">Coverage</div>
+              <div className="sidebar-header accordion-header" onClick={() => setCoverageOpen(v => !v)}>
+                <span>Coverage</span>
+                <span className={`accordion-chevron ${coverageOpen ? 'open' : ''}`}>›</span>
+              </div>
+              <div className={`accordion-wrap ${coverageOpen ? 'open' : ''}`}>
+              <div className="accordion-inner">
               {departments.map(d => {
                 const cnt = spaces.filter(s => s.department_id === d.id).length;
                 if (cnt === 0) return null;
@@ -725,7 +822,10 @@ export default function SmartWorkspace({
                 );
               })()}
             </div>
+            </div>
+            </div>
           )}
+        </div>
         </div>
       </div>
 
@@ -733,6 +833,28 @@ export default function SmartWorkspace({
       {toast && (
         <div className={`toast-notification toast-${toast.type}`}>{toast.msg}</div>
       )}
+
+      {/* ── Export Preview Modal ── */}
+      <Modal show={showPreview} onHide={() => setShowPreview(false)} centered size="xl">
+        <Modal.Header closeButton className="py-2">
+          <Modal.Title style={{ fontSize: '0.95rem' }}>
+            🖼️ Export Preview{pageLabel ? ` — ${pageLabel}` : ''}
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body style={{ background: '#f1f5f9', textAlign: 'center', padding: '1.25rem' }}>
+          {previewDataUrl && (
+            <img
+              src={previewDataUrl}
+              alt="Floor plan preview"
+              style={{ maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}
+            />
+          )}
+        </Modal.Body>
+        <Modal.Footer className="py-2">
+          <Button variant="outline-secondary" size="sm" onClick={() => setShowPreview(false)}>Close</Button>
+          <Button variant="primary" size="sm" onClick={downloadPreview}>⬇ Download PNG</Button>
+        </Modal.Footer>
+      </Modal>
 
       {/* ── Edit / Assign Modal ── */}
       <Modal show={showModal} onHide={closeModal} centered size="sm">

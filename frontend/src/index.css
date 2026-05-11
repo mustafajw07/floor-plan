@@ -167,12 +167,63 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
     linear-gradient(rgba(0,0,0,0.04) 1px, transparent 1px),
     linear-gradient(90deg, rgba(0,0,0,0.04) 1px, transparent 1px);
   background-size: 24px 24px;
-  overflow: hidden;
+  overflow: auto;
   line-height: 0;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────────── */
-.sidebar { width: 256px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+/* ── Sidebar zone (wrapper that holds the pull-tab + sliding panel) ───────── */
+.sidebar-zone {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+  /* width = tab (20px) + gap (4px) + panel (256px) */
+  width: calc(256px + 24px);
+  transition: width 0.28s ease;
+  overflow: hidden;
+}
+.sidebar-zone.closed {
+  width: 24px; /* only the pull-tab remains */
+}
+
+/* Pull-tab button on the left edge of the sidebar zone */
+.sidebar-tab {
+  flex-shrink: 0;
+  width: 20px;
+  align-self: stretch;
+  min-height: 60px;
+  background: #f1f5f9;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  cursor: pointer;
+  font-size: 1.15rem;
+  line-height: 1;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s, color 0.15s;
+  margin-right: 4px;
+}
+.sidebar-tab:hover { background: #e2e8f0; color: var(--primary); }
+
+.sidebar {
+  width: 256px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  transition: transform 0.28s ease, opacity 0.28s ease;
+  transform: translateX(0);
+  opacity: 1;
+}
+.sidebar-zone.closed .sidebar {
+  transform: translateX(110%);
+  opacity: 0;
+  pointer-events: none;
+}
 .sidebar-card {
   background: white;
   border-radius: 10px;
@@ -193,6 +244,55 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
   align-items: center;
   justify-content: space-between;
 }
+.accordion-header {
+  cursor: pointer;
+  user-select: none;
+}
+.accordion-header:hover { background: #f1f5f9; }
+
+/* Accordion chevron */
+.accordion-chevron {
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--muted);
+  transition: transform 0.22s ease;
+  display: inline-block;
+  transform: rotate(90deg);
+}
+.accordion-chevron.open { transform: rotate(-90deg); }
+
+/* Accordion body animation (grid trick for smooth height) */
+.accordion-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s ease;
+}
+.accordion-wrap.open { grid-template-rows: 1fr; }
+.accordion-inner { overflow: hidden; }
+
+/* Top collapsible banners */
+.top-accordion {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.top-accordion-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.875rem;
+  background: #eff6ff;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: #1e40af;
+  border-bottom: 1px solid #bfdbfe;
+}
+.top-accordion-header:hover { background: #dbeafe; }
+.top-accordion-header > span:first-child { flex: 1; }
 
 /* ── Space List ───────────────────────────────────────────────────────────── */
 .space-list { max-height: 320px; overflow-y: auto; }
@@ -322,12 +422,63 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
   animation: slideUp 0.25s ease;
 }
 .toast-success { background: #065f46; }
+.toast-info    { background: #1e40af; }
 .toast-warning { background: #92400e; }
 .toast-error   { background: #991b1b; }
 @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ── Utilities ────────────────────────────────────────────────────────────── */
 .empty-state { padding: 1.5rem; text-align: center; color: var(--muted); font-size: 0.82rem; }
+
+/* ── Page Tabs (multi-page / PDF) ─────────────────────────────────────────── */
+.page-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.page-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: white;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+  transition: all 0.15s;
+  max-width: 180px;
+  user-select: none;
+}
+.page-tab:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-light); }
+.page-tab.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+  box-shadow: 0 2px 6px rgba(79,70,229,0.3);
+}
+.page-tab-num {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.12);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.68rem; font-weight: 700;
+  flex-shrink: 0;
+}
+.page-tab.active .page-tab-num { background: rgba(255,255,255,0.25); }
+.page-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Zoom Slider ─────────────────────────────────────────────────────────── */
+.zoom-slider {
+  width: 72px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  vertical-align: middle;
+}
 .badge-count {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: 50%;

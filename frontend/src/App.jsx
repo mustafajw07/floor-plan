@@ -4,7 +4,7 @@ import './index.css';
 import SmartWorkspace from './components/SmartWorkspace';
 import Departments from './components/Departments';
 
-const API = 'https://floor-plan-1fq2.onrender.com';
+const API = 'http://localhost:8000';  // TODO: move to .env
 
 const STEPS = [
   { label: 'Upload Plan' },
@@ -14,15 +14,24 @@ const STEPS = [
 
 export default function App() {
   const [step, setStep] = useState(0);
-  const [imageSrc, setImageSrc] = useState(null);
-  const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
-  const [spaces, setSpaces] = useState([]);
+
+  // Multi-page state: each page holds its own image + spaces
+  const [pages, setPages] = useState([]);          // [{id, label, imageSrc, imageSize, spaces, processResult}]
+  const [activePageIdx, setActivePageIdx] = useState(0);
+
   const [departments, setDepartments] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processResult, setProcessResult] = useState(null);
+  const [processingMsg, setProcessingMsg] = useState('');
   const [showDepts, setShowDepts] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState(null);
+
+  // Derived helpers for the active page
+  const activePage = pages[activePageIdx] ?? null;
+
+  const setActiveSpaces = useCallback((newSpaces) => {
+    setPages(prev => prev.map((p, i) => i === activePageIdx ? { ...p, spaces: newSpaces } : p));
+  }, [activePageIdx]);
 
   const fetchDepts = useCallback(() => {
     fetch(`${API}/api/departments`)
@@ -33,48 +42,79 @@ export default function App() {
 
   useEffect(() => { fetchDepts(); }, [fetchDepts]);
 
-  const processFile = async (file) => {
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      setError('Please upload an image file (JPG or PNG).');
+  // Process one or more files (images or PDFs) sequentially
+  const processFiles = async (files) => {
+    const fileArray = Array.from(files).filter(f =>
+      f.type.startsWith('image/') || f.type === 'application/pdf'
+    );
+    if (fileArray.length === 0) {
+      setError('Please upload image files (JPG/PNG/…) or PDF files.');
       return;
     }
     setError(null);
-    setImageSrc(URL.createObjectURL(file));
     setIsProcessing(true);
-    setProcessResult(null);
-    setSpaces([]);
+    setPages([]);
 
-    const fd = new FormData();
-    fd.append('file', file);
+    const allPages = [];
 
-    try {
-      const res = await fetch(`${API}/api/upload-smart-plan`, { method: 'POST', body: fd });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-        throw new Error(err.detail || 'Upload failed');
+    for (let i = 0; i < fileArray.length; i++) {
+      const file = fileArray[i];
+      setProcessingMsg(
+        fileArray.length > 1
+          ? `Processing file ${i + 1} of ${fileArray.length}: ${file.name}`
+          : `Analyzing ${file.name}…`
+      );
+
+      const isPdf   = file.type === 'application/pdf';
+      // For images, create a blob URL now so we don't need base64 from the backend
+      const blobUrl = isPdf ? null : URL.createObjectURL(file);
+
+      const fd = new FormData();
+      fd.append('file', file);
+
+      try {
+        const res = await fetch(`${API}/api/upload-smart-plan`, { method: 'POST', body: fd });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+          throw new Error(err.detail || 'Upload failed');
+        }
+        const data = await res.json();
+
+        for (const page of (data.pages ?? [])) {
+          allPages.push({
+            id:           `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+            label:        page.label || file.name,
+            imageSrc:     page.image_base64 ?? blobUrl,
+            imageSize:    { width: page.image_width, height: page.image_height },
+            spaces:       page.spaces ?? [],
+            processResult: { rooms: page.rooms_detected },
+          });
+        }
+      } catch (err) {
+        setError(`Failed on "${file.name}": ${err.message}`);
+        // continue to next file
       }
-      const data = await res.json();
-      setSpaces(data.spaces || []);
-      setImageSize({ width: data.image_width, height: data.image_height });
-      setProcessResult({ rooms: data.rooms_detected });
+    }
+
+    setIsProcessing(false);
+    setProcessingMsg('');
+
+    if (allPages.length > 0) {
+      setPages(allPages);
+      setActivePageIdx(0);
       setStep(1);
-    } catch (err) {
-      setError(`Processing failed: ${err.message}`);
-      setImageSrc(null);
-    } finally {
-      setIsProcessing(false);
     }
   };
 
-  const handleFileInput = (e) => processFile(e.target.files[0]);
+  const handleFileInput = (e) => { processFiles(e.target.files); e.target.value = ''; };
   const handleDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
-    processFile(e.dataTransfer.files[0]);
+    processFiles(e.dataTransfer.files);
   };
 
-  const assignedCount = spaces.filter(s => s.department_id).length;
+  const assignedCount = activePage?.spaces.filter(s => s.department_id).length ?? 0;
+  const totalSpaces   = activePage?.spaces.length ?? 0;
 
   return (
     <div className="app-shell">
@@ -119,6 +159,7 @@ export default function App() {
               <h2 style={{ fontWeight: 800, fontSize: '1.6rem' }}>Upload Your Floor Plan</h2>
               <p className="text-muted mt-1" style={{ fontSize: '0.95rem' }}>
                 Our AI will scan the image, detect room labels, and draw boundaries automatically.
+                Upload multiple images or a multi-page PDF to edit each floor separately.
               </p>
             </div>
 
@@ -132,9 +173,7 @@ export default function App() {
               <div className="text-center py-5">
                 <div className="spinner-border text-primary mb-3" style={{ width: '3rem', height: '3rem' }} role="status" />
                 <h5 className="fw-bold">Analyzing floor plan…</h5>
-                <p className="text-muted" style={{ fontSize: '0.9rem' }}>
-                  AI is running OCR to detect rooms and extract labels. This takes a few seconds.
-                </p>
+                <p className="text-muted" style={{ fontSize: '0.9rem' }}>{processingMsg}</p>
               </div>
             ) : (
               <label
@@ -144,30 +183,51 @@ export default function App() {
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
               >
-                <input type="file" accept="image/*" onChange={handleFileInput} style={{ display: 'none' }} />
+                <input type="file" accept="image/*,.pdf" multiple onChange={handleFileInput} style={{ display: 'none' }} />
                 <span className="upload-icon">🗺️</span>
                 <h3>Drop your floor plan here</h3>
                 <p>or click to browse files</p>
                 <p className="mt-2" style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-                  JPG · PNG · TIFF &nbsp;·&nbsp; Max 20 MB
+                  JPG · PNG · TIFF · PDF &nbsp;·&nbsp; Multiple files supported &nbsp;·&nbsp; Max 20 MB each
                 </p>
               </label>
             )}
           </div>
         )}
 
-        {/* ── Steps 1 & 2: Canvas ── */}
-        {(step === 1 || step === 2) && (
-          <SmartWorkspace
-            imageSrc={imageSrc}
-            imageWidth={imageSize.width}
-            imageHeight={imageSize.height}
-            spaces={spaces}
-            setSpaces={setSpaces}
-            departments={departments}
-            mode={step === 1 ? 'edit' : 'assign'}
-            processResult={processResult}
-          />
+        {/* ── Steps 1 & 2: Canvas with page tabs ── */}
+        {(step === 1 || step === 2) && activePage && (
+          <>
+            {/* Page tabs — only shown when more than one page */}
+            {pages.length > 1 && (
+              <div className="page-tabs">
+                {pages.map((page, idx) => (
+                  <button
+                    key={page.id}
+                    className={`page-tab ${idx === activePageIdx ? 'active' : ''}`}
+                    onClick={() => setActivePageIdx(idx)}
+                    title={page.label}
+                  >
+                    <span className="page-tab-num">{idx + 1}</span>
+                    <span className="page-tab-label">{page.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <SmartWorkspace
+              key={activePage.id}
+              imageSrc={activePage.imageSrc}
+              imageWidth={activePage.imageSize.width}
+              imageHeight={activePage.imageSize.height}
+              spaces={activePage.spaces}
+              setSpaces={setActiveSpaces}
+              departments={departments}
+              mode={step === 1 ? 'edit' : 'assign'}
+              processResult={activePage.processResult}
+              pageLabel={pages.length > 1 ? activePage.label : null}
+            />
+          </>
         )}
 
         {/* ── Step Navigation ── */}
@@ -178,8 +238,8 @@ export default function App() {
             </button>
             <div className="step-nav-info">
               {step === 1
-                ? <>{spaces.length} room{spaces.length !== 1 ? 's' : ''} mapped</>
-                : <>{assignedCount} / {spaces.length} rooms assigned ({spaces.length ? Math.round(assignedCount / spaces.length * 100) : 0}%)</>
+                ? <>{totalSpaces} room{totalSpaces !== 1 ? 's' : ''} mapped{pages.length > 1 ? ` · ${pages.length} pages` : ''}</>
+                : <>{assignedCount} / {totalSpaces} rooms assigned ({totalSpaces ? Math.round(assignedCount / totalSpaces * 100) : 0}%)</>
               }
             </div>
             {step < 2 ? (

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import departments, smart_plan
+from routers import departments, smart_plan, projects
 
 app = FastAPI(title="Smart Space Planner API")
 
@@ -15,6 +15,7 @@ app.add_middleware(
 
 app.include_router(departments.router)
 app.include_router(smart_plan.router)
+app.include_router(projects.router)
 
 if __name__ == "__main__":
     import uvicorn

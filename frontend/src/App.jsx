@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import './index.css';
 import SmartWorkspace from './components/SmartWorkspace';
 import Departments from './components/Departments';
+import { Modal, Button } from 'react-bootstrap';
 
 const API = 'https://floor-plan-1fq2.onrender.com';  // TODO: move to .env
 
@@ -12,19 +13,30 @@ const STEPS = [
   { label: 'Assign & Export' },
 ];
 
+const AUTOSAVE_DELAY = 3000; // ms
+
 export default function App() {
   const [step, setStep] = useState(0);
 
-  // Multi-page state: each page holds its own image + spaces
-  const [pages, setPages] = useState([]);          // [{id, label, imageSrc, imageSize, spaces, processResult}]
+  // Multi-page state: each page holds its own image + spaces + optional dbId (Supabase canvas_pages.id)
+  const [pages, setPages] = useState([]);
   const [activePageIdx, setActivePageIdx] = useState(0);
 
-  const [departments, setDepartments] = useState([]);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [departments, setDepartments]     = useState([]);
+  const [isProcessing, setIsProcessing]   = useState(false);
   const [processingMsg, setProcessingMsg] = useState('');
-  const [showDepts, setShowDepts] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-  const [error, setError] = useState(null);
+  const [showDepts, setShowDepts]         = useState(false);
+  const [dragOver, setDragOver]           = useState(false);
+  const [error, setError]                 = useState(null);
+
+  // Project state
+  const [currentProjectId, setCurrentProjectId] = useState(null);
+  const [saveStatus, setSaveStatus]             = useState(null); // 'saving' | 'saved' | 'error'
+  const [showProjects, setShowProjects]         = useState(false);
+  const [projectList, setProjectList]           = useState([]);
+  const [projectsLoading, setProjectsLoading]   = useState(false);
+
+  const autosaveTimerRef = useRef(null);
 
   // Derived helpers for the active page
   const activePage = pages[activePageIdx] ?? null;
@@ -33,6 +45,7 @@ export default function App() {
     setPages(prev => prev.map((p, i) => i === activePageIdx ? { ...p, spaces: newSpaces } : p));
   }, [activePageIdx]);
 
+  // ── Departments ────────────────────────────────────────────────────────────
   const fetchDepts = useCallback(() => {
     fetch(`${API}/api/departments`)
       .then(r => r.json())
@@ -42,7 +55,122 @@ export default function App() {
 
   useEffect(() => { fetchDepts(); }, [fetchDepts]);
 
-  // Process one or more files (images or PDFs) sequentially
+  // ── Projects: save canvas pages to Supabase ────────────────────────────────
+  const saveCanvasPages = useCallback(async (projectId, pagesSnapshot) => {
+    if (!projectId || pagesSnapshot.length === 0) return;
+    setSaveStatus('saving');
+    try {
+      const body = {
+        pages: pagesSnapshot.map((p, i) => ({
+          label:           p.label,
+          image_src:       p.imageSrc ?? '',
+          image_width:     p.imageSize.width,
+          image_height:    p.imageSize.height,
+          spaces:          p.spaces,
+          page_index:      i,
+          preview_data_url: p.previewDataUrl ?? null,
+        })),
+      };
+      const res = await fetch(`${API}/api/projects/${projectId}/pages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error('Save failed');
+      const saved = await res.json(); // [{id, project_id, ...}]
+      // Persist Supabase IDs back into page state so preview patches work
+      setPages(prev => prev.map((p, i) => ({ ...p, dbId: saved[i]?.id ?? p.dbId })));
+      setSaveStatus('saved');
+    } catch {
+      setSaveStatus('error');
+    }
+  }, []);
+
+  // Auto-save on page/spaces change (debounced)
+  useEffect(() => {
+    if (!currentProjectId || pages.length === 0) return;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    setSaveStatus('saving');
+    autosaveTimerRef.current = setTimeout(() => {
+      saveCanvasPages(currentProjectId, pages);
+    }, AUTOSAVE_DELAY);
+    return () => clearTimeout(autosaveTimerRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages, currentProjectId]);
+
+  // ── Projects: load list ────────────────────────────────────────────────────
+  const fetchProjects = useCallback(async () => {
+    setProjectsLoading(true);
+    try {
+      const res = await fetch(`${API}/api/projects`);
+      const data = await res.json();
+      setProjectList(data);
+    } catch {
+      setProjectList([]);
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, []);
+
+  const openProjectsModal = () => {
+    setShowProjects(true);
+    fetchProjects();
+  };
+
+  // ── Projects: load a saved project ────────────────────────────────────────
+  const loadProject = async (project) => {
+    setShowProjects(false);
+    setIsProcessing(true);
+    setProcessingMsg(`Loading "${project.name}"…`);
+    try {
+      const res = await fetch(`${API}/api/projects/${project.id}/pages`);
+      if (!res.ok) throw new Error('Failed to load project');
+      const savedPages = await res.json();
+      if (savedPages.length === 0) throw new Error('No pages found in this project');
+
+      const loadedPages = savedPages.map(p => ({
+        id:           p.id,
+        dbId:         p.id,
+        label:        p.label,
+        imageSrc:     p.image_src,
+        imageSize:    { width: p.image_width, height: p.image_height },
+        spaces:       p.spaces ?? [],
+        processResult: { rooms: (p.spaces ?? []).length },
+        previewDataUrl: p.preview_data_url ?? null,
+      }));
+
+      setPages(loadedPages);
+      setActivePageIdx(0);
+      setCurrentProjectId(project.id);
+      setSaveStatus('saved');
+      setStep(2); // open in Assign & Export mode so preview is visible
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsProcessing(false);
+      setProcessingMsg('');
+    }
+  };
+
+  // ── Preview callback: save preview data URL for a page ────────────────────
+  const handleSavePreview = useCallback(async (previewDataUrl, pageLocalId) => {
+    if (!currentProjectId) return;
+    const page = pages.find(p => p.id === pageLocalId);
+    if (!page?.dbId) return; // page not yet synced to Supabase
+    try {
+      await fetch(`${API}/api/projects/${currentProjectId}/pages/${page.dbId}/preview`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preview_data_url: previewDataUrl }),
+      });
+      // Update local state so preview is available without a reload
+      setPages(prev => prev.map(p => p.id === pageLocalId ? { ...p, previewDataUrl } : p));
+    } catch {
+      // non-critical — preview still shows locally
+    }
+  }, [currentProjectId, pages]);
+
+  // ── File processing ────────────────────────────────────────────────────────
   const processFiles = async (files) => {
     const fileArray = Array.from(files).filter(f =>
       f.type.startsWith('image/') || f.type === 'application/pdf'
@@ -54,6 +182,8 @@ export default function App() {
     setError(null);
     setIsProcessing(true);
     setPages([]);
+    setCurrentProjectId(null);
+    setSaveStatus(null);
 
     const allPages = [];
 
@@ -66,7 +196,6 @@ export default function App() {
       );
 
       const isPdf   = file.type === 'application/pdf';
-      // For images, create a blob URL now so we don't need base64 from the backend
       const blobUrl = isPdf ? null : URL.createObjectURL(file);
 
       const fd = new FormData();
@@ -83,16 +212,17 @@ export default function App() {
         for (const page of (data.pages ?? [])) {
           allPages.push({
             id:           `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+            dbId:         null,
             label:        page.label || file.name,
             imageSrc:     page.image_base64 ?? blobUrl,
             imageSize:    { width: page.image_width, height: page.image_height },
             spaces:       page.spaces ?? [],
             processResult: { rooms: page.rooms_detected },
+            previewDataUrl: null,
           });
         }
       } catch (err) {
         setError(`Failed on "${file.name}": ${err.message}`);
-        // continue to next file
       }
     }
 
@@ -103,6 +233,24 @@ export default function App() {
       setPages(allPages);
       setActivePageIdx(0);
       setStep(1);
+
+      // Auto-create a project in Supabase
+      try {
+        const projectName = fileArray.length === 1 ? fileArray[0].name : `${fileArray[0].name} (+${fileArray.length - 1} more)`;
+        const res = await fetch(`${API}/api/projects`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: projectName }),
+        });
+        if (res.ok) {
+          const proj = await res.json();
+          setCurrentProjectId(proj.id);
+          // Immediately save pages (don't wait for debounce)
+          await saveCanvasPages(proj.id, allPages);
+        }
+      } catch {
+        // project saving is non-critical
+      }
     }
   };
 
@@ -129,9 +277,17 @@ export default function App() {
           </div>
           Floor Planner
         </div>
-        <button className="btn btn-sm btn-outline-light" onClick={() => setShowDepts(true)}>
-          ⚙&nbsp; Departments
-        </button>
+        <div className="d-flex align-items-center gap-2">
+          {saveStatus === 'saving' && <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.7)' }}>Saving…</span>}
+          {saveStatus === 'saved'  && <span style={{ fontSize: '0.75rem', color: '#86efac' }}>✓ Saved</span>}
+          {saveStatus === 'error'  && <span style={{ fontSize: '0.75rem', color: '#fca5a5' }}>Save failed</span>}
+          <button className="btn btn-sm btn-outline-light" onClick={openProjectsModal}>
+            📂&nbsp; Projects
+          </button>
+          <button className="btn btn-sm btn-outline-light" onClick={() => setShowDepts(true)}>
+            ⚙&nbsp; Departments
+          </button>
+        </div>
       </header>
 
       {/* ── Stepper ── */}
@@ -226,6 +382,9 @@ export default function App() {
               mode={step === 1 ? 'edit' : 'assign'}
               processResult={activePage.processResult}
               pageLabel={pages.length > 1 ? activePage.label : null}
+              pageId={activePage.id}
+              savedPreviewUrl={activePage.previewDataUrl}
+              onSavePreview={handleSavePreview}
             />
           </>
         )}
@@ -265,6 +424,49 @@ export default function App() {
           API={API}
         />
       )}
+
+      {/* ── Projects Modal ── */}
+      <Modal show={showProjects} onHide={() => setShowProjects(false)} centered size="lg">
+        <Modal.Header closeButton>
+          <Modal.Title style={{ fontSize: '1rem' }}>📂 Saved Projects</Modal.Title>
+        </Modal.Header>
+        <Modal.Body style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          {projectsLoading ? (
+            <div className="text-center py-4">
+              <div className="spinner-border spinner-border-sm text-primary me-2" role="status" />
+              Loading projects…
+            </div>
+          ) : projectList.length === 0 ? (
+            <p className="text-muted text-center py-4" style={{ fontSize: '0.9rem' }}>
+              No saved projects yet. Upload a floor plan to create one automatically.
+            </p>
+          ) : (
+            <div className="d-flex flex-column gap-3">
+              {projectList.map(proj => (
+                <div
+                  key={proj.id}
+                  className="d-flex align-items-center gap-3 p-3 rounded border"
+                  style={{ background: currentProjectId === proj.id ? '#f0fdf4' : '#fff', borderColor: currentProjectId === proj.id ? '#86efac' : '#e2e8f0', cursor: 'pointer' }}
+                  onClick={() => loadProject(proj)}
+                >
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{proj.name}</div>
+                    <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                      {currentProjectId === proj.id ? '● Currently open · ' : ''}
+                      Last saved {new Date(proj.updated_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <Button variant="outline-primary" size="sm">Open</Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal.Body>
+        <Modal.Footer className="py-2">
+          <Button variant="secondary" size="sm" onClick={() => setShowProjects(false)}>Close</Button>
+        </Modal.Footer>
+      </Modal>
     </div>
   );
 }
+

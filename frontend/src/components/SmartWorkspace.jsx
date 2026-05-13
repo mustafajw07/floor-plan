@@ -34,6 +34,9 @@ export default function SmartWorkspace({
   mode,
   processResult,
   pageLabel,
+  pageId,
+  savedPreviewUrl,
+  onSavePreview,
 }) {
   const [imgEl, imgStatus] = useImage(imageSrc || '');
   const containerRef = useRef(null);
@@ -427,6 +430,10 @@ export default function SmartWorkspace({
     const uri = stageRef.current.toDataURL({ pixelRatio: 2 });
     setPreviewDataUrl(uri);
     setShowPreview(true);
+    // Persist the preview for all users
+    if (onSavePreview && pageId) {
+      onSavePreview(uri, pageId);
+    }
   };
 
   const downloadPreview = () => {
@@ -842,13 +849,13 @@ export default function SmartWorkspace({
           </Modal.Title>
         </Modal.Header>
         <Modal.Body style={{ background: '#f1f5f9', textAlign: 'center', padding: '1.25rem' }}>
-          {previewDataUrl && (
+          {(previewDataUrl || savedPreviewUrl) ? (
             <img
-              src={previewDataUrl}
+              src={previewDataUrl || savedPreviewUrl}
               alt="Floor plan preview"
               style={{ maxWidth: '100%', maxHeight: '70vh', objectFit: 'contain', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}
             />
-          )}
+          ) : null}
         </Modal.Body>
         <Modal.Footer className="py-2">
           <Button variant="outline-secondary" size="sm" onClick={() => setShowPreview(false)}>Close</Button>

@@ -6,3 +6,5 @@ opencv-python-headless==4.11.0.86
 numpy==2.2.5
 pytesseract==0.3.13
 PyMuPDF==1.24.11
+supabase==2.15.2
+python-dotenv==1.1.0

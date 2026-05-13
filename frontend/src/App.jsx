@@ -52,9 +52,16 @@ export default function App() {
   // Derived helpers for the active page
   const activePage = pages[activePageIdx] ?? null;
 
-  const setActiveSpaces = useCallback((newSpaces) => {
+  const setActiveSpaces = useCallback((newSpacesOrUpdater) => {
     pagesDirtyRef.current = true; // mark dirty so auto-save fires
-    setPages(prev => prev.map((p, i) => i === activePageIdx ? { ...p, spaces: newSpaces } : p));
+    setPages(prev => prev.map((p, i) => {
+      if (i !== activePageIdx) return p;
+      // Support both plain array and functional-updater (prev => ...) forms
+      const newSpaces = typeof newSpacesOrUpdater === 'function'
+        ? newSpacesOrUpdater(p.spaces)
+        : newSpacesOrUpdater;
+      return { ...p, spaces: newSpaces };
+    }));
   }, [activePageIdx]);
 
   // ── Departments ────────────────────────────────────────────────────────────

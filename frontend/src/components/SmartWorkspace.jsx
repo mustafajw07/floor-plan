@@ -713,13 +713,14 @@ function SmartWorkspace({
                               dragThrottleRef.current[key] = now;
                               const nx = e.target.x();
                               const ny = e.target.y();
-                              setSpaces(prev => prev.map(sp => {
+                              const nextSpaces = spacesRef.current.map(sp => {
                                 if (sp.id !== s.id) return sp;
                                 const pts = [...sp.points];
                                 pts[vi]     = nx;
                                 pts[vi + 1] = ny;
                                 return { ...sp, points: pts };
-                              }));
+                              });
+                              setSpaces(nextSpaces);
                             }}
                             onDragEnd={() => pushHistory(spacesRef.current)}
                             onMouseEnter={(e) => {

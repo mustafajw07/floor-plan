@@ -26,7 +26,6 @@ export default function App() {
 
   const [departments, setDepartments]     = useState([]);
   const [isProcessing, setIsProcessing]   = useState(false);
-  const [processingMsg, setProcessingMsg] = useState('');
   const [showDepts, setShowDepts]         = useState(false);
   const [dragOver, setDragOver]           = useState(false);
   const [error, setError]                 = useState(null);
@@ -58,9 +57,9 @@ export default function App() {
       if (i !== activePageIdx) return p;
       // Support both plain array and functional-updater (prev => ...) forms
       const newSpaces = typeof newSpacesOrUpdater === 'function'
-        ? newSpacesOrUpdater(p.spaces)
+        ? newSpacesOrUpdater(Array.isArray(p.spaces) ? p.spaces : [])
         : newSpacesOrUpdater;
-      return { ...p, spaces: newSpaces };
+      return { ...p, spaces: Array.isArray(newSpaces) ? newSpaces : [] };
     }));
   }, [activePageIdx]);
 
@@ -120,7 +119,6 @@ export default function App() {
       saveCanvasPages(currentProjectId, pages);
     }, AUTOSAVE_DELAY);
     return () => clearTimeout(autosaveTimerRef.current);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pages, currentProjectId, saveCanvasPages]);
 
   // ── Projects: load list ────────────────────────────────────────────────────
@@ -221,11 +219,6 @@ export default function App() {
 
     for (let i = 0; i < fileArray.length; i++) {
       const file = fileArray[i];
-      setProcessingMsg(
-        fileArray.length > 1
-          ? `Processing file ${i + 1} of ${fileArray.length}: ${file.name}`
-          : `Analyzing ${file.name}…`
-      );
 
       const isPdf   = file.type === 'application/pdf';
       const blobUrl = isPdf ? null : URL.createObjectURL(file);
@@ -259,7 +252,6 @@ export default function App() {
     }
 
     setIsProcessing(false);
-    setProcessingMsg('');
     setLoadingMsg('');
 
     if (allPages.length > 0) {
@@ -296,7 +288,6 @@ export default function App() {
 
   const assignedCount = useMemo(
     () => activePage?.spaces.filter(s => s.department_id).length ?? 0,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [activePage?.spaces],
   );
   const totalSpaces   = activePage?.spaces.length ?? 0;

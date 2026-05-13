@@ -27,7 +27,7 @@ const centroid = (pts) => {
 const shiftPoints = (pts, dx, dy) =>
   pts.map((v, i) => (i % 2 === 0 ? v + dx : v + dy));
 
-export default function SmartWorkspace({
+function SmartWorkspace({
   imageSrc, imageWidth, imageHeight,
   spaces, setSpaces,
   departments,
@@ -45,7 +45,10 @@ export default function SmartWorkspace({
   // Canvas sizing — stageSize is derived from scale, not stored in state
   const [scale,    setScale]    = useState(1);
   const [fitScale, setFitScale] = useState(1); // auto-fit scale (without user zoom)
-  const stageSize = { width: Math.round(imageWidth * scale), height: Math.round(imageHeight * scale) };
+  const stageSize = useMemo(() => ({
+    width:  Math.round(imageWidth  * scale),
+    height: Math.round(imageHeight * scale),
+  }), [imageWidth, imageHeight, scale]);
 
   // Drawing
   const [tool,    setTool]    = useState('pointer'); // 'pointer' | 'draw'
@@ -73,8 +76,14 @@ export default function SmartWorkspace({
   const clipboardRef = useRef([]);
 
   // Export preview
-  const [showPreview, setShowPreview]       = useState(false);
-  const [previewDataUrl, setPreviewDataUrl] = useState(null);
+  const [showPreview, setShowPreview]           = useState(false);
+  const [previewDataUrl, setPreviewDataUrl]     = useState(null);
+  const [previewGenerating, setPreviewGenerating] = useState(false);
+
+  // Throttle refs (used inline — no hook needed for these)
+  const previewThrottleRef = useRef(0); // prevent rapid repeated toDataURL calls
+  const scrollThrottleRef  = useRef(0); // cap zoom-scroll to ~60fps
+  const dragThrottleRef    = useRef({}); // per-vertex drag rate limit
 
   // Accordion / panel visibility
   const [sidebarOpen,  setSidebarOpen]  = useState(true);
@@ -91,6 +100,15 @@ export default function SmartWorkspace({
   // Always-fresh ref to selectedIds
   const selectedIdsRef = useRef(selectedIds);
   useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+
+  // Refs that let heavy callbacks stay stable without listing fast-changing state in deps
+  const toolRef    = useRef(tool);
+  const drawPtsRef = useRef(drawPts);
+  const hoverPtRef = useRef(null);
+  const scaleRef   = useRef(scale);
+  useEffect(() => { toolRef.current    = tool;    }, [tool]);
+  useEffect(() => { drawPtsRef.current = drawPts; }, [drawPts]);
+  useEffect(() => { scaleRef.current   = scale;   }, [scale]);
 
   // helper to sync the render-trigger state after any history mutation
   const syncHistoryState = useCallback(() => {
@@ -188,6 +206,10 @@ export default function SmartWorkspace({
     const handler = (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
+      // Throttle scroll zoom to ~60fps to avoid thrashing React state
+      const now = Date.now();
+      if (now - scrollThrottleRef.current < 16) return;
+      scrollThrottleRef.current = now;
       const factor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
       setScale(prev => Math.min(4.0, Math.max(0.05, +(prev * factor).toFixed(6))));
     };
@@ -230,8 +252,8 @@ export default function SmartWorkspace({
   const screenToImg = useCallback(() => {
     if (!stageRef.current) return null;
     const p = stageRef.current.getPointerPosition();
-    return p ? { x: p.x / scale, y: p.y / scale } : null;
-  }, [scale]);
+    return p ? { x: p.x / scaleRef.current, y: p.y / scaleRef.current } : null;
+  }, []); // completely stable — reads scale via scaleRef
 
   // ── Copy / Paste / Delete ──────────────────────────────────────────────────
   const handleCopy = useCallback(() => {
@@ -336,8 +358,8 @@ export default function SmartWorkspace({
     if (pos) setHoverPt(pos);
   };
 
-  const handleShapeClick = (e, space) => {
-    if (tool === 'draw') return;
+  const handleShapeClick = useCallback((e, space) => {
+    if (toolRef.current === 'draw') return;
     e.cancelBubble = true;
     const shiftHeld = e.evt?.shiftKey;
 
@@ -376,21 +398,21 @@ export default function SmartWorkspace({
     } else {
       setSelectedIds(new Set([space.id]));
     }
-  };
+  }, [mode, commitSpaces, fireToast]); // reads tool/selectedIds via refs
 
-  // ── Polygon drag: move all selected shapes together ────────────────────────
-  const handlePolygonDragEnd = (e, spaceId) => {
+  // ── Polygon drag: move all selected shapes together ────────────────────────────
+  const handlePolygonDragEnd = useCallback((e, spaceId) => {
     const node = e.target;
-    const dx   = node.x() / scale;
-    const dy   = node.y() / scale;
+    const dx   = node.x() / scaleRef.current;
+    const dy   = node.y() / scaleRef.current;
     node.position({ x: 0, y: 0 });
     // If dragged shape is part of the selection, move all selected; otherwise just this one
-    const idsToMove = selectedIds.has(spaceId) ? selectedIds : new Set([spaceId]);
+    const idsToMove = selectedIdsRef.current.has(spaceId) ? selectedIdsRef.current : new Set([spaceId]);
     commitSpaces(spacesRef.current.map(s =>
       idsToMove.has(s.id) ? { ...s, points: shiftPoints(s.points, dx, dy) } : s
     ));
     fireToast('Position updated');
-  };
+  }, [commitSpaces, fireToast]);
 
   // ── Modal ──────────────────────────────────────────────────────────────────
   const handleSave = (e) => {
@@ -422,21 +444,35 @@ export default function SmartWorkspace({
     fireToast('Space deleted. Ctrl+Z to undo.', 'warning');
   };
 
-  const closeModal = () => { setShowModal(false); setEditingSpace(null); };
+  const closeModal = useCallback(() => { setShowModal(false); setEditingSpace(null); }, []);
 
   // ── Export / Preview ────────────────────────────────────────────────────────
   const openPreview = () => {
-    if (!stageRef.current) return;
-    const uri = stageRef.current.toDataURL({ pixelRatio: 2 });
-    setPreviewDataUrl(uri);
-    setShowPreview(true);
-    // Persist the preview for all users
-    if (onSavePreview && pageId) {
-      onSavePreview(uri, pageId);
+    if (!stageRef.current || previewGenerating) return;
+    // Throttle: block rapid repeated exports (2 s window)
+    const now = Date.now();
+    if (now - previewThrottleRef.current < 2000) {
+      fireToast('Please wait before exporting again', 'warning');
+      return;
     }
+    previewThrottleRef.current = now;
+    setPreviewGenerating(true);
+    // rAF lets React render the loading state before the blocking toDataURL call
+    requestAnimationFrame(() => {
+      try {
+        const uri = stageRef.current.toDataURL({ pixelRatio: 2 });
+        setPreviewDataUrl(uri);
+        setShowPreview(true);
+        if (onSavePreview && pageId) {
+          onSavePreview(uri, pageId);
+        }
+      } finally {
+        setPreviewGenerating(false);
+      }
+    });
   };
 
-  const downloadPreview = () => {
+  const downloadPreview = useCallback(() => {
     if (!previewDataUrl) return;
     const a = document.createElement('a');
     const name = pageLabel
@@ -447,12 +483,25 @@ export default function SmartWorkspace({
     a.click();
     fireToast('PNG exported!');
     setShowPreview(false);
-  };
+  }, [previewDataUrl, pageLabel, fireToast]);
 
   // ── Derived values ─────────────────────────────────────────────────────────
-  const livePts  = hoverPt && drawPts.length >= 2 ? [...drawPts, hoverPt.x, hoverPt.y] : drawPts;
-  const assigned = spaces.filter(s => s.department_id).length;
-  const pctDone  = spaces.length ? Math.round(assigned / spaces.length * 100) : 0;
+  const livePts = useMemo(
+    () => hoverPt && drawPts.length >= 2 ? [...drawPts, hoverPt.x, hoverPt.y] : drawPts,
+    [hoverPt, drawPts],
+  );
+  const { assigned, pctDone } = useMemo(() => {
+    const a = spaces.filter(s => s.department_id).length;
+    return { assigned: a, pctDone: spaces.length ? Math.round(a / spaces.length * 100) : 0 };
+  }, [spaces]);
+  // Pre-compute per-department counts once per spaces change; avoids O(n·m) filter in render
+  const coverageStats = useMemo(() => {
+    const counts = {};
+    spaces.forEach(s => {
+      if (s.department_id) counts[s.department_id] = (counts[s.department_id] || 0) + 1;
+    });
+    return { counts, unassigned: spaces.filter(s => !s.department_id).length };
+  }, [spaces]);
   const canUndo  = historySize.idx > 0;
   const canRedo  = historySize.idx < historySize.len - 1;
 
@@ -564,7 +613,9 @@ export default function SmartWorkspace({
               title={`Scale: ${zoomPct}%`}
             />
             <div style={{ flex: 1 }} />
-            <button className="tool-btn" onClick={openPreview} title="Preview & Export as PNG">⬇ Export PNG</button>
+            <button className="tool-btn" onClick={openPreview} disabled={previewGenerating} title="Preview & Export as PNG">
+              {previewGenerating ? <><span className="spinner-border spinner-border-sm me-1" role="status" /> Generating…</> : '⬇ Export PNG'}
+            </button>
           </div>
 
           {/* ── Konva Stage ── */}
@@ -572,6 +623,11 @@ export default function SmartWorkspace({
             {imgStatus === 'loading' && (
               <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--muted)' }}>
                 <div className="spinner-border spinner-border-sm me-2" />Loading image…
+              </div>
+            )}
+            {imgStatus === 'failed' && (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--muted)', fontSize: '0.85rem' }}>
+                ⚠️ Image could not be loaded — room outlines are still editable below
               </div>
             )}
             <Stage
@@ -582,7 +638,7 @@ export default function SmartWorkspace({
               onMouseMove={handleMouseMove}
               style={{
                 cursor: tool === 'draw' ? 'crosshair' : 'default',
-                display: imgStatus === 'loaded' ? 'block' : 'none',
+                display: imgStatus === 'loading' ? 'none' : 'block',
               }}
             >
               <Layer scaleX={scale} scaleY={scale}>
@@ -649,6 +705,12 @@ export default function SmartWorkspace({
                             strokeWidth={2 / scale}
                             draggable
                             onDragMove={(e) => {
+                              // Throttle vertex drag state updates to ~30fps to avoid
+                              // flooding React with redraws on every mouse-move event
+                              const key = `${s.id}-${vi}`;
+                              const now = Date.now();
+                              if (now - (dragThrottleRef.current[key] ?? 0) < 33) return;
+                              dragThrottleRef.current[key] = now;
                               const nx = e.target.x();
                               const ny = e.target.y();
                               setSpaces(prev => prev.map(sp => {
@@ -799,7 +861,7 @@ export default function SmartWorkspace({
               <div className={`accordion-wrap ${coverageOpen ? 'open' : ''}`}>
               <div className="accordion-inner">
               {departments.map(d => {
-                const cnt = spaces.filter(s => s.department_id === d.id).length;
+                const cnt = coverageStats.counts[d.id] ?? 0;
                 if (cnt === 0) return null;
                 const pct = Math.round(cnt / spaces.length * 100);
                 return (
@@ -814,7 +876,7 @@ export default function SmartWorkspace({
                 );
               })}
               {(() => {
-                const u = spaces.filter(s => !s.department_id).length;
+                const u = coverageStats.unassigned;
                 if (!u) return null;
                 const pct = Math.round(u / spaces.length * 100);
                 return (
@@ -934,3 +996,5 @@ export default function SmartWorkspace({
     </div>
   );
 }
+
+export default React.memo(SmartWorkspace);

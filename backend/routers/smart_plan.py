@@ -210,7 +210,7 @@ async def process_smart_plan(file: UploadFile = File(...)):
                 raise HTTPException(status_code=400, detail="Could not decode image.")
 
             page_data = _process_image(img)
-            # No image_base64 for plain images — the frontend uses the original blob URL
+            page_data["image_base64"] = _img_to_base64(img)  # always encode so it can be persisted in Supabase
             page_data["label"] = file.filename or "Image"
             pages.append(page_data)
 

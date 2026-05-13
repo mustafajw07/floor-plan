@@ -120,6 +120,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
   border: 1px solid var(--border);
   overflow: hidden;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  contain: layout; /* prevent layout recalculations from escaping the canvas panel */
 }
 
 /* ── Canvas Toolbar ───────────────────────────────────────────────────────── */
@@ -169,6 +170,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
   background-size: 24px 24px;
   overflow: auto;
   line-height: 0;
+  will-change: transform; /* promote to GPU layer for smooth zooming/panning */
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────────── */
@@ -484,4 +486,20 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: v
   width: 20px; height: 20px; border-radius: 50%;
   background: var(--primary); color: white;
   font-size: 0.68rem; font-weight: 700;
+}
+
+/* ── Upload zone disabled state ───────────────────────────────────────────── */
+.upload-zone-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Loader overlay animations ────────────────────────────────────────────── */
+@keyframes loaderFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes loaderSlideUp {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)    scale(1);    }
 }

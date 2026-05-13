@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import './index.css';
 import SmartWorkspace from './components/SmartWorkspace';
 import Departments from './components/Departments';
+import Loader from './components/Loader';
+import { useThrottle } from './hooks/useThrottle';
 import { Modal, Button } from 'react-bootstrap';
 
 const API = 'https://floor-plan-1fq2.onrender.com';  // TODO: move to .env
@@ -36,12 +38,22 @@ export default function App() {
   const [projectList, setProjectList]           = useState([]);
   const [projectsLoading, setProjectsLoading]   = useState(false);
 
+  // Full-screen blocking loader (covers time-consuming API operations)
+  const [isLoadingProject, setIsLoadingProject] = useState(false);
+  const [loadingMsg, setLoadingMsg]             = useState('');
+
   const autosaveTimerRef = useRef(null);
+  // Ref map: pageLocalId → Supabase canvas_pages.id
+  // Using a ref avoids triggering the auto-save effect when dbIds are updated
+  const dbIdsRef = useRef({});
+  // Dirty flag: true only when pages changed due to a real user edit
+  const pagesDirtyRef = useRef(false);
 
   // Derived helpers for the active page
   const activePage = pages[activePageIdx] ?? null;
 
   const setActiveSpaces = useCallback((newSpaces) => {
+    pagesDirtyRef.current = true; // mark dirty so auto-save fires
     setPages(prev => prev.map((p, i) => i === activePageIdx ? { ...p, spaces: newSpaces } : p));
   }, [activePageIdx]);
 
@@ -77,26 +89,32 @@ export default function App() {
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error('Save failed');
-      const saved = await res.json(); // [{id, project_id, ...}]
-      // Persist Supabase IDs back into page state so preview patches work
-      setPages(prev => prev.map((p, i) => ({ ...p, dbId: saved[i]?.id ?? p.dbId })));
+      const saved = await res.json();
+      // Write Supabase IDs into a ref — NOT into pages state
+      // Writing to state would re-trigger this effect, creating an infinite save loop
+      saved.forEach((s, i) => {
+        const pg = pagesSnapshot[i];
+        if (pg && s?.id) dbIdsRef.current[pg.id] = s.id;
+      });
       setSaveStatus('saved');
     } catch {
       setSaveStatus('error');
     }
   }, []);
 
-  // Auto-save on page/spaces change (debounced)
+  // Auto-save on page/spaces change (debounced).
+  // Only fires when pagesDirtyRef is set — prevents looping when dbIdsRef is updated
   useEffect(() => {
-    if (!currentProjectId || pages.length === 0) return;
+    if (!currentProjectId || pages.length === 0 || !pagesDirtyRef.current) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     setSaveStatus('saving');
     autosaveTimerRef.current = setTimeout(() => {
+      pagesDirtyRef.current = false;
       saveCanvasPages(currentProjectId, pages);
     }, AUTOSAVE_DELAY);
     return () => clearTimeout(autosaveTimerRef.current);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pages, currentProjectId]);
+  }, [pages, currentProjectId, saveCanvasPages]);
 
   // ── Projects: load list ────────────────────────────────────────────────────
   const fetchProjects = useCallback(async () => {
@@ -112,16 +130,17 @@ export default function App() {
     }
   }, []);
 
-  const openProjectsModal = () => {
+  const openProjectsModal = useCallback(() => {
     setShowProjects(true);
     fetchProjects();
-  };
+  }, [fetchProjects]);
 
   // ── Projects: load a saved project ────────────────────────────────────────
   const loadProject = async (project) => {
     setShowProjects(false);
-    setIsProcessing(true);
-    setProcessingMsg(`Loading "${project.name}"…`);
+    setIsLoadingProject(true);
+    setLoadingMsg(`Loading "${project.name}"…`);
+    dbIdsRef.current = {}; // clear stale dbId mappings from previous project
     try {
       const res = await fetch(`${API}/api/projects/${project.id}/pages`);
       if (!res.ok) throw new Error('Failed to load project');
@@ -143,35 +162,38 @@ export default function App() {
       setActivePageIdx(0);
       setCurrentProjectId(project.id);
       setSaveStatus('saved');
-      setStep(2); // open in Assign & Export mode so preview is visible
+      setStep(2);
+      // Populate dbIdsRef so preview patching works immediately
+      loadedPages.forEach(p => { dbIdsRef.current[p.id] = p.id; });
     } catch (err) {
       setError(err.message);
     } finally {
-      setIsProcessing(false);
-      setProcessingMsg('');
+      setIsLoadingProject(false);
+      setLoadingMsg('');
     }
   };
 
   // ── Preview callback: save preview data URL for a page ────────────────────
-  const handleSavePreview = useCallback(async (previewDataUrl, pageLocalId) => {
+  // Throttled to 3 s — generating + uploading a 2× PNG data URL is expensive
+  const _savePreviewImpl = useCallback(async (previewDataUrl, pageLocalId) => {
     if (!currentProjectId) return;
-    const page = pages.find(p => p.id === pageLocalId);
-    if (!page?.dbId) return; // page not yet synced to Supabase
+    const dbId = dbIdsRef.current[pageLocalId]; // stable ref — no pages dep needed
+    if (!dbId) return;
     try {
-      await fetch(`${API}/api/projects/${currentProjectId}/pages/${page.dbId}/preview`, {
+      await fetch(`${API}/api/projects/${currentProjectId}/pages/${dbId}/preview`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ preview_data_url: previewDataUrl }),
       });
-      // Update local state so preview is available without a reload
-      setPages(prev => prev.map(p => p.id === pageLocalId ? { ...p, previewDataUrl } : p));
     } catch {
       // non-critical — preview still shows locally
     }
-  }, [currentProjectId, pages]);
+  }, [currentProjectId]); // no `pages` dep — uses stable dbIdsRef
+
+  const handleSavePreview = useThrottle(_savePreviewImpl, 3000);
 
   // ── File processing ────────────────────────────────────────────────────────
-  const processFiles = async (files) => {
+  const processFiles = useCallback(async (files) => {
     const fileArray = Array.from(files).filter(f =>
       f.type.startsWith('image/') || f.type === 'application/pdf'
     );
@@ -181,9 +203,12 @@ export default function App() {
     }
     setError(null);
     setIsProcessing(true);
+    setLoadingMsg(fileArray.length > 1 ? `Analyzing ${fileArray.length} files…` : `Analyzing ${fileArray[0].name}…`);
     setPages([]);
     setCurrentProjectId(null);
     setSaveStatus(null);
+    dbIdsRef.current = {};      // clear stale mappings
+    pagesDirtyRef.current = false;
 
     const allPages = [];
 
@@ -228,6 +253,7 @@ export default function App() {
 
     setIsProcessing(false);
     setProcessingMsg('');
+    setLoadingMsg('');
 
     if (allPages.length > 0) {
       setPages(allPages);
@@ -252,16 +278,20 @@ export default function App() {
         // project saving is non-critical
       }
     }
-  };
+  }, [saveCanvasPages]);
 
-  const handleFileInput = (e) => { processFiles(e.target.files); e.target.value = ''; };
-  const handleDrop = (e) => {
+  const handleFileInput = useCallback((e) => { processFiles(e.target.files); e.target.value = ''; }, [processFiles]);
+  const handleDrop = useCallback((e) => {
     e.preventDefault();
     setDragOver(false);
     processFiles(e.dataTransfer.files);
-  };
+  }, [processFiles]);
 
-  const assignedCount = activePage?.spaces.filter(s => s.department_id).length ?? 0;
+  const assignedCount = useMemo(
+    () => activePage?.spaces.filter(s => s.department_id).length ?? 0,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activePage?.spaces],
+  );
   const totalSpaces   = activePage?.spaces.length ?? 0;
 
   return (
@@ -325,21 +355,14 @@ export default function App() {
               </div>
             )}
 
-            {isProcessing ? (
-              <div className="text-center py-5">
-                <div className="spinner-border text-primary mb-3" style={{ width: '3rem', height: '3rem' }} role="status" />
-                <h5 className="fw-bold">Analyzing floor plan…</h5>
-                <p className="text-muted" style={{ fontSize: '0.9rem' }}>{processingMsg}</p>
-              </div>
-            ) : (
-              <label
-                className={`upload-zone ${dragOver ? 'drag-over' : ''}`}
-                style={{ maxWidth: 580, margin: '0 auto' }}
-                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            <label
+                className={`upload-zone ${dragOver ? 'drag-over' : ''} ${isProcessing ? 'upload-zone-disabled' : ''}`}
+                style={{ maxWidth: 580, margin: '0 auto', pointerEvents: isProcessing ? 'none' : undefined }}
+                onDragOver={(e) => { if (!isProcessing) { e.preventDefault(); setDragOver(true); } }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
               >
-                <input type="file" accept="image/*,.pdf" multiple onChange={handleFileInput} style={{ display: 'none' }} />
+                <input type="file" accept="image/*,.pdf" multiple onChange={handleFileInput} style={{ display: 'none' }} disabled={isProcessing} />
                 <span className="upload-icon">🗺️</span>
                 <h3>Drop your floor plan here</h3>
                 <p>or click to browse files</p>
@@ -347,7 +370,6 @@ export default function App() {
                   JPG · PNG · TIFF · PDF &nbsp;·&nbsp; Multiple files supported &nbsp;·&nbsp; Max 20 MB each
                 </p>
               </label>
-            )}
           </div>
         )}
 
@@ -466,6 +488,19 @@ export default function App() {
           <Button variant="secondary" size="sm" onClick={() => setShowProjects(false)}>Close</Button>
         </Modal.Footer>
       </Modal>
+
+      {/* ── Full-screen blocking Loader ── */}
+      {/* File analysis: covers the full viewport so no interaction is possible */}
+      <Loader
+        show={isProcessing}
+        message="Analyzing floor plan…"
+        subMessage={loadingMsg}
+      />
+      {/* Project loading from Supabase */}
+      <Loader
+        show={isLoadingProject}
+        message={loadingMsg || 'Loading project…'}
+      />
     </div>
   );
 }

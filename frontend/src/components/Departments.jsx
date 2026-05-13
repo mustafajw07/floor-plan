@@ -7,7 +7,7 @@ const PRESET_COLORS = [
   '#c4b5fd', '#86efac', '#fdba74', '#67e8f9', '#f0abfc',
 ];
 
-export default function Departments({ departments, onRefresh, onClose, API }) {
+function Departments({ departments, onRefresh, onClose, API }) {
   const [name,    setName]    = useState('');
   const [color,   setColor]   = useState('#6ee7b7');
   const [editId,  setEditId]  = useState(null);
@@ -171,3 +171,5 @@ export default function Departments({ departments, onRefresh, onClose, API }) {
     </Modal>
   );
 }
+
+export default React.memo(Departments);
